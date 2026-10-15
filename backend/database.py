@@ -1,6 +1,8 @@
 """Database and cache connections and session management."""
 
 import logging
+import re
+import sys
 from typing import AsyncGenerator
 from sqlalchemy import create_engine, text
 from sqlalchemy.ext.asyncio import (
@@ -9,6 +11,7 @@ from sqlalchemy.ext.asyncio import (
     create_async_engine,
 )
 from sqlalchemy.orm import declarative_base, sessionmaker
+from sqlalchemy.pool import NullPool
 import redis.asyncio as aioredis
 from backend.config import get_settings
 
@@ -16,8 +19,19 @@ logger = logging.getLogger(__name__)
 
 settings = get_settings()
 
-import sys
-from sqlalchemy.pool import NullPool
+
+def mask_sensitive_data(text_val: str) -> str:
+    """Masks database and redis passwords and credentials in error messages and logs."""
+    if not text_val:
+        return text_val
+    # Mask standard URI credentials: //user:password@ -> //user:***@
+    masked = re.sub(r"://([^:@/]+):([^@/]+)@", r"://\1:***@", str(text_val))
+    # Mask password-only URI credentials: //:password@ -> //:***@
+    masked = re.sub(r"://:([^@/]+)@", r"://:***@", masked)
+    # Mask key-value password parameters
+    masked = re.sub(r"(password[:=\s\'\"]+)([^\s\'\",;]+)", r"\1***", masked, flags=re.IGNORECASE)
+    return masked
+
 
 # Asynchronous engine for FastAPI web handlers
 is_test = "pytest" in sys.modules or settings.APP_ENV == "test"
@@ -28,10 +42,17 @@ else:
     async_engine_kwargs["pool_size"] = 10
     async_engine_kwargs["max_overflow"] = 20
 
-async_engine = create_async_engine(
-    settings.database_url_async,
-    **async_engine_kwargs,
-)
+try:
+    async_engine = create_async_engine(
+        settings.database_url_async,
+        **async_engine_kwargs,
+    )
+except Exception as exc:
+    sanitized_err = mask_sensitive_data(str(exc))
+    logger.critical(
+        f"Failed to create async database engine with URL {mask_sensitive_data(settings.database_url_async)}: {sanitized_err}"
+    )
+    raise
 
 AsyncSessionLocal = async_sessionmaker(
     bind=async_engine,
@@ -42,11 +63,18 @@ AsyncSessionLocal = async_sessionmaker(
 )
 
 # Synchronous engine for Alembic migrations, management CLI and bulk operations
-sync_engine = create_engine(
-    settings.database_url_sync,
-    echo=False,
-    pool_pre_ping=True,
-)
+try:
+    sync_engine = create_engine(
+        settings.database_url_sync,
+        echo=False,
+        pool_pre_ping=True,
+    )
+except Exception as exc:
+    sanitized_err = mask_sensitive_data(str(exc))
+    logger.critical(
+        f"Failed to create sync database engine with URL {mask_sensitive_data(settings.database_url_sync)}: {sanitized_err}"
+    )
+    raise
 
 SyncSessionLocal = sessionmaker(
     bind=sync_engine,
@@ -78,7 +106,7 @@ async def check_database_connection() -> dict:
                 postgis_version = gis_res.scalar()
                 has_postgis = True
             except Exception as gis_err:
-                logger.warning(f"PostGIS extension check failed: {gis_err}")
+                logger.warning(f"PostGIS extension check failed: {mask_sensitive_data(str(gis_err))}")
                 postgis_version = None
                 has_postgis = False
 
@@ -89,10 +117,11 @@ async def check_database_connection() -> dict:
                 "postgis_version": postgis_version,
             }
     except Exception as exc:
-        logger.error(f"Database connection failed: {exc}")
+        sanitized_err = mask_sensitive_data(str(exc))
+        logger.error(f"Database connection failed: {sanitized_err}")
         return {
             "status": "disconnected",
-            "error": str(exc),
+            "error": sanitized_err,
             "has_postgis": False,
         }
 
@@ -112,9 +141,10 @@ async def check_redis_connection() -> dict:
             "ping": bool(pong),
         }
     except Exception as exc:
-        logger.warning(f"Redis connection failed: {exc}")
+        sanitized_err = mask_sensitive_data(str(exc))
+        logger.warning(f"Redis connection failed: {sanitized_err}")
         return {
             "status": "disconnected",
-            "error": str(exc),
+            "error": sanitized_err,
             "ping": False,
         }

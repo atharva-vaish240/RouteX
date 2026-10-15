@@ -140,6 +140,8 @@ async def logout(
     response.delete_cookie(
         key=settings.REFRESH_COOKIE_NAME,
         path=settings.REFRESH_COOKIE_PATH,
+        secure=settings.REFRESH_COOKIE_SECURE,
+        samesite=settings.REFRESH_COOKIE_SAMESITE,
     )
 
     return {"status": "ok", "message": "Successfully logged out and session revoked."}

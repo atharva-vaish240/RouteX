@@ -121,3 +121,172 @@ def test_production_valid_configuration():
     assert valid.CORS_ORIGINS == ["https://routex.ai", "https://app.routex.ai"]
     assert valid.ALLOW_DEV_AUTH_HEADERS is False
 
+
+def test_render_internal_database_url_without_port():
+    from sqlalchemy.engine import make_url
+
+    s = Settings(
+        DATABASE_URL="postgres://nerlink_user:super_secret_db_password@dpg-cxxxxxxxx-a/nerlink"
+    )
+    assert s.database_url_async.startswith("postgresql+asyncpg://nerlink_user:super_secret_db_password@dpg-cxxxxxxxx-a/nerlink")
+    assert s.database_url_sync.startswith("postgresql+psycopg://nerlink_user:super_secret_db_password@dpg-cxxxxxxxx-a/nerlink")
+
+    async_parsed = make_url(s.database_url_async)
+    assert async_parsed.drivername == "postgresql+asyncpg"
+    assert async_parsed.host == "dpg-cxxxxxxxx-a"
+    assert async_parsed.port is None
+    assert async_parsed.database == "nerlink"
+
+    sync_parsed = make_url(s.database_url_sync)
+    assert sync_parsed.drivername == "postgresql+psycopg"
+    assert sync_parsed.port is None
+
+
+def test_render_external_database_url_with_sslmode():
+    from sqlalchemy.engine import make_url
+
+    s = Settings(
+        DATABASE_URL="postgres://nerlink_user:super_secret_db_password@dpg-cxxxxxxxx-a.oregon-postgres.render.com:5432/nerlink?sslmode=require"
+    )
+    assert "ssl=require" in s.database_url_async
+    assert "sslmode=require" in s.database_url_sync
+
+    async_parsed = make_url(s.database_url_async)
+    assert async_parsed.port == 5432
+    assert async_parsed.query.get("ssl") == "require"
+
+    sync_parsed = make_url(s.database_url_sync)
+    assert sync_parsed.port == 5432
+    assert sync_parsed.query.get("sslmode") == "require"
+
+
+def test_malformed_empty_port_colon_cleaned():
+    from sqlalchemy.engine import make_url
+
+    # Trailing colon before slash
+    s = Settings(
+        DATABASE_URL="postgres://nerlink_user:super_secret_db_password@dpg-cxxxxxxxx-a:/nerlink"
+    )
+    async_parsed = make_url(s.database_url_async)
+    assert async_parsed.host == "dpg-cxxxxxxxx-a"
+    assert async_parsed.port is None
+
+
+def test_postgres_host_as_full_connection_string():
+    from sqlalchemy.engine import make_url
+
+    s = Settings(
+        POSTGRES_HOST="postgres://nerlink_user:super_secret_db_password@dpg-cxxxxxxxx-a/nerlink"
+    )
+    async_parsed = make_url(s.database_url_async)
+    assert async_parsed.host == "dpg-cxxxxxxxx-a"
+    assert async_parsed.database == "nerlink"
+    assert async_parsed.port is None
+
+
+def test_postgres_host_with_port_or_trailing_colon():
+    from sqlalchemy.engine import make_url
+
+    # Embedded port in host
+    s1 = Settings(POSTGRES_HOST="dpg-cxxxxxxxx-a.render.com:5432")
+    async_parsed1 = make_url(s1.database_url_async)
+    assert async_parsed1.host == "dpg-cxxxxxxxx-a.render.com"
+    assert async_parsed1.port == 5432
+    assert ":5432:5432" not in s1.database_url_async
+
+    # Host with trailing colon
+    s2 = Settings(POSTGRES_HOST="dpg-cxxxxxxxx-a:")
+    async_parsed2 = make_url(s2.database_url_async)
+    assert async_parsed2.host == "dpg-cxxxxxxxx-a"
+    assert not async_parsed2.host.endswith(":")
+
+
+def test_empty_port_strings_sanitized():
+    s = Settings(POSTGRES_PORT="", REDIS_PORT="")
+    assert s.POSTGRES_PORT == 5432
+    assert s.REDIS_PORT == 6379
+
+
+def test_redis_url_configurations():
+    s1 = Settings(REDIS_URL="redis://red-cxxxxxxxx:6379")
+    assert s1.redis_url == "redis://red-cxxxxxxxx:6379"
+
+    s2 = Settings(REDIS_URL="rediss://default:redis_secure_pass@red-cxxxxxxxx:6379/1")
+    assert s2.redis_url == "rediss://default:redis_secure_pass@red-cxxxxxxxx:6379/1"
+
+    s3 = Settings(REDIS_HOST="red-cxxxxxxxx:6379")
+    assert s3.redis_url == "redis://red-cxxxxxxxx:6379/0"
+
+
+def test_production_database_url_password_validation():
+    # Strong password in DATABASE_URL passes in production without setting POSTGRES_PASSWORD
+    valid = Settings(
+        APP_ENV="production",
+        DATABASE_URL="postgres://nerlink_user:super_strong_production_pw_2026@dpg-cxxxxxxxx-a/nerlink",
+        JWT_SECRET_KEY="a" * 32,
+        ALLOW_DEV_AUTH_HEADERS=False,
+        CORS_ORIGINS="https://routex.ai",
+    )
+    assert valid.APP_ENV == "production"
+
+    # Weak default password in DATABASE_URL is rejected in production
+    with pytest.raises(ValidationError, match="strong, explicit POSTGRES_PASSWORD"):
+        Settings(
+            APP_ENV="production",
+            DATABASE_URL="postgres://nerlink_user:nerlink_secure_password@dpg-cxxxxxxxx-a/nerlink",
+            JWT_SECRET_KEY="a" * 32,
+            ALLOW_DEV_AUTH_HEADERS=False,
+            CORS_ORIGINS="https://routex.ai",
+        )
+
+
+def test_mask_sensitive_data():
+    from backend.database import mask_sensitive_data
+
+    # Standard database URL with credentials
+    raw_db_err = "Failed to connect to postgresql+asyncpg://admin_user:super_secret_db_pass_123@dpg-cxxxx:5432/db"
+    masked = mask_sensitive_data(raw_db_err)
+    assert "super_secret_db_pass_123" not in masked
+    assert "postgresql+asyncpg://admin_user:***@dpg-cxxxx:5432/db" in masked
+
+    # Redis URL with password
+    raw_redis_err = "Redis error: redis://:super_redis_pass_456@red-cxxxx:6379/0"
+    masked_redis = mask_sensitive_data(raw_redis_err)
+    assert "super_redis_pass_456" not in masked_redis
+    assert "redis://:***@red-cxxxx:6379/0" in masked_redis
+
+    # Key-value password
+    raw_kv = "password='cleartext_secret' failed"
+    masked_kv = mask_sensitive_data(raw_kv)
+    assert "cleartext_secret" not in masked_kv
+
+
+def test_cors_origins_vercel_normalization():
+    # Default contains vercel domain
+    s_default = Settings()
+    assert "https://route-x-two.vercel.app" in s_default.CORS_ORIGINS
+
+    # String with trailing slash normalizes without trailing slash
+    s_slash = Settings(CORS_ORIGINS="https://route-x-two.vercel.app/, http://localhost:3000/")
+    assert s_slash.CORS_ORIGINS == ["https://route-x-two.vercel.app", "http://localhost:3000"]
+
+
+def test_production_cross_origin_cookie_settings():
+    # Development mode keeps Lax and False for local HTTP dev
+    s_dev = Settings(APP_ENV="development")
+    assert s_dev.REFRESH_COOKIE_SECURE is False
+    assert s_dev.REFRESH_COOKIE_SAMESITE == "lax"
+
+    # Production mode automatically upgrades to Secure=True and SameSite=none for cross-origin Vercel -> Render auth
+    s_prod = Settings(
+        APP_ENV="production",
+        JWT_SECRET_KEY="super_secret_production_key_32_chars!",
+        POSTGRES_PASSWORD="strong_password_12345",
+        ALLOW_DEV_AUTH_HEADERS=False,
+        CORS_ORIGINS="https://route-x-two.vercel.app",
+    )
+    assert s_prod.REFRESH_COOKIE_SECURE is True
+    assert s_prod.REFRESH_COOKIE_SAMESITE == "none"
+
+
+

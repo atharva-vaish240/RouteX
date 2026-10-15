@@ -18,7 +18,8 @@ if config.config_file_name is not None:
     fileConfig(config.config_file_name)
 
 settings = get_settings()
-config.set_main_option("sqlalchemy.url", settings.database_url_sync)
+# Escape '%' so Alembic's ConfigParser doesn't fail on percent-encoded characters
+config.set_main_option("sqlalchemy.url", settings.database_url_sync.replace("%", "%%"))
 
 target_metadata = Base.metadata
 
@@ -96,8 +97,11 @@ def run_migrations_online() -> None:
     )
 
     with connectable.connect() as connection:
-        connection.execute(sa.text("CREATE EXTENSION IF NOT EXISTS postgis;"))
-        connection.commit()
+        try:
+            connection.execute(sa.text("CREATE EXTENSION IF NOT EXISTS postgis;"))
+            connection.commit()
+        except Exception:
+            connection.rollback()
 
         context.configure(
             connection=connection,

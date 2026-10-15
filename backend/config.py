@@ -1,9 +1,11 @@
 """Application settings and configuration management."""
 
 from functools import lru_cache
-from typing import Annotated
-from pydantic import AliasChoices, Field, field_validator
+import re
+from typing import Annotated, Any
+from pydantic import AliasChoices, Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+from sqlalchemy.engine import URL, make_url
 
 
 class Settings(BaseSettings):
@@ -29,10 +31,31 @@ class Settings(BaseSettings):
     POSTGRES_HOST: str = "localhost"
     POSTGRES_PORT: int = 55432
 
+    # Database URL override (e.g. Render, Railway, Supabase, Neon)
+    DATABASE_URL: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices(
+            "DATABASE_URL",
+            "INTERNAL_DATABASE_URL",
+            "POSTGRES_URL",
+            "DATABASE_URI",
+        ),
+    )
+
     # Redis
     REDIS_HOST: str = "localhost"
     REDIS_PORT: int = 56379
     REDIS_DB: int = 0
+
+    # Redis URL override (e.g. Render Redis, Upstash)
+    REDIS_URL: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices(
+            "REDIS_URL",
+            "INTERNAL_REDIS_URL",
+            "REDIS_URI",
+        ),
+    )
 
     # Study Corridor Configuration (Configurable geographic scope)
     CORRIDOR_NAME: str = "Guwahati-Tawang"
@@ -117,6 +140,7 @@ class Settings(BaseSettings):
     CORS_ORIGINS: list[str] | str = [
         "http://localhost:3000",
         "http://127.0.0.1:3000",
+        "https://route-x-two.vercel.app",
     ]
 
     # Admin Provisioning Configuration (supports ADMIN_EMAIL / ADMIN_PASSWORD or ADMIN_BOOTSTRAP_*)
@@ -153,12 +177,12 @@ class Settings(BaseSettings):
             if v_str.startswith("[") and v_str.endswith("]"):
                 import json
                 try:
-                    return json.loads(v_str)
+                    return [i.strip().rstrip("/") for i in json.loads(v_str) if i.strip()]
                 except Exception:
                     pass
-            return [i.strip() for i in v_str.split(",") if i.strip()]
+            return [i.strip().rstrip("/") for i in v_str.split(",") if i.strip()]
         elif isinstance(v, list):
-            return [str(i).strip() for i in v if str(i).strip()]
+            return [str(i).strip().rstrip("/") for i in v if str(i).strip()]
         return []
 
     @field_validator("CORS_ORIGINS")
@@ -174,17 +198,90 @@ class Settings(BaseSettings):
                 )
         return v
 
-    @field_validator("POSTGRES_PASSWORD")
+    @field_validator("DATABASE_URL", "REDIS_URL", mode="before")
     @classmethod
-    def validate_postgres_password(cls, v: str, info) -> str:
-        app_env = info.data.get("APP_ENV", "development") if info.data else "development"
-        if app_env == "production" and (
-            not v or "nerlink_secure_password" in v or len(v) < 8
-        ):
-            raise ValueError(
-                "Production environment requires a strong, explicit POSTGRES_PASSWORD."
-            )
+    def normalize_empty_urls(cls, v: Any) -> str | None:
+        if isinstance(v, str):
+            v_str = v.strip()
+            return v_str if v_str else None
         return v
+
+    @field_validator("POSTGRES_PORT", mode="before")
+    @classmethod
+    def assemble_postgres_port(cls, v: Any) -> int:
+        if v is None or v == "":
+            return 5432
+        if isinstance(v, str):
+            v_str = v.strip()
+            if not v_str:
+                return 5432
+            return int(v_str)
+        return int(v)
+
+    @field_validator("REDIS_PORT", mode="before")
+    @classmethod
+    def assemble_redis_port(cls, v: Any) -> int:
+        if v is None or v == "":
+            return 6379
+        if isinstance(v, str):
+            v_str = v.strip()
+            if not v_str:
+                return 6379
+            return int(v_str)
+        return int(v)
+
+    @field_validator("POSTGRES_HOST", mode="before")
+    @classmethod
+    def assemble_postgres_host(cls, v: Any) -> str:
+        if isinstance(v, str):
+            v_str = v.strip()
+            if not v_str:
+                return "localhost"
+            return v_str.rstrip(":")
+        return str(v) if v else "localhost"
+
+    @field_validator("REDIS_HOST", mode="before")
+    @classmethod
+    def assemble_redis_host(cls, v: Any) -> str:
+        if isinstance(v, str):
+            v_str = v.strip()
+            if not v_str:
+                return "localhost"
+            return v_str.rstrip(":")
+        return str(v) if v else "localhost"
+
+    @model_validator(mode="after")
+    def validate_production_postgres_password(self) -> "Settings":
+        if self.APP_ENV == "production":
+            active_pwd = self.POSTGRES_PASSWORD
+            target_url = self.DATABASE_URL or (self.POSTGRES_HOST if "://" in self.POSTGRES_HOST else None)
+            if target_url:
+                try:
+                    raw = target_url.strip()
+                    if "://" in raw:
+                        scheme, rest = raw.split("://", 1)
+                        if scheme in ("postgres", "postgresql"):
+                            scheme = "postgresql"
+                        rest = re.sub(r":(?=/|$|\?)", "", rest)
+                        raw = f"{scheme}://{rest}"
+                    parsed = make_url(raw)
+                    if parsed.password:
+                        active_pwd = parsed.password
+                except Exception:
+                    pass
+
+            if not active_pwd or "nerlink_secure_password" in active_pwd or len(active_pwd) < 8:
+                raise ValueError(
+                    "Production environment requires a strong, explicit POSTGRES_PASSWORD."
+                )
+
+            # In production, cross-origin cookies between Vercel and Render require Secure=True and SameSite=none
+            if not self.REFRESH_COOKIE_SECURE:
+                self.REFRESH_COOKIE_SECURE = True
+            if self.REFRESH_COOKIE_SAMESITE.lower() == "lax":
+                self.REFRESH_COOKIE_SAMESITE = "none"
+
+        return self
 
     @field_validator("ALLOW_DEV_AUTH_HEADERS")
     @classmethod
@@ -222,26 +319,97 @@ class Settings(BaseSettings):
             raise ValueError(f"Longitude must be between -180 and 180, got {v}")
         return v
 
+    def _build_database_url(self, async_driver: bool) -> str:
+        """Constructs a robust SQLAlchemy database URL for sync or async operations."""
+        raw_url = self.DATABASE_URL
+        host = self.POSTGRES_HOST
+        if not raw_url and host and ("://" in host):
+            raw_url = host
+
+        if raw_url:
+            raw = raw_url.strip()
+            # Clean empty port if present (e.g., host:/ or host:?)
+            if "://" in raw:
+                scheme, rest = raw.split("://", 1)
+                if scheme in ("postgres", "postgresql"):
+                    scheme = "postgresql"
+                rest = re.sub(r":(?=/|$|\?)", "", rest)
+                raw = f"{scheme}://{rest}"
+
+            parsed = make_url(raw)
+            if async_driver:
+                async_query = dict(parsed.query)
+                if "sslmode" in async_query:
+                    sm = async_query.pop("sslmode")
+                    if sm in ("require", "verify-ca", "verify-full"):
+                        async_query["ssl"] = "require"
+                    elif sm in ("disable", "none", "false"):
+                        async_query["ssl"] = "disable"
+                res_url = parsed.set(drivername="postgresql+asyncpg", query=async_query)
+            else:
+                res_url = parsed.set(drivername="postgresql+psycopg")
+            return res_url.render_as_string(hide_password=False)
+
+        # Individual field resolution
+        h = (host or "localhost").strip().rstrip(":")
+        p = self.POSTGRES_PORT
+        if ":" in h and not h.startswith("["):
+            parts = h.rsplit(":", 1)
+            if parts[1].isdigit():
+                h = parts[0]
+                p = int(parts[1])
+
+        if p is None:
+            p = 55432 if h in ("localhost", "127.0.0.1") and self.APP_ENV != "production" else 5432
+
+        base_url = URL.create(
+            drivername="postgresql+asyncpg" if async_driver else "postgresql+psycopg",
+            username=self.POSTGRES_USER,
+            password=self.POSTGRES_PASSWORD,
+            host=h,
+            port=p,
+            database=self.POSTGRES_DB,
+        )
+        return base_url.render_as_string(hide_password=False)
+
     @property
     def database_url_sync(self) -> str:
         """Synchronous connection URL using psycopg for Alembic and CLI scripts."""
-        return (
-            f"postgresql+psycopg://{self.POSTGRES_USER}:{self.POSTGRES_PASSWORD}@"
-            f"{self.POSTGRES_HOST}:{self.POSTGRES_PORT}/{self.POSTGRES_DB}"
-        )
+        return self._build_database_url(async_driver=False)
 
     @property
     def database_url_async(self) -> str:
         """Asynchronous connection URL using asyncpg for FastAPI application."""
-        return (
-            f"postgresql+asyncpg://{self.POSTGRES_USER}:{self.POSTGRES_PASSWORD}@"
-            f"{self.POSTGRES_HOST}:{self.POSTGRES_PORT}/{self.POSTGRES_DB}"
-        )
+        return self._build_database_url(async_driver=True)
 
     @property
     def redis_url(self) -> str:
         """Redis connection URL."""
-        return f"redis://{self.REDIS_HOST}:{self.REDIS_PORT}/{self.REDIS_DB}"
+        raw_url = self.REDIS_URL
+        host = self.REDIS_HOST
+        if not raw_url and host and ("://" in host):
+            raw_url = host
+
+        if raw_url:
+            raw = raw_url.strip()
+            if "://" in raw:
+                scheme, rest = raw.split("://", 1)
+                rest = re.sub(r":(?=/|$|\?)", "", rest)
+                raw = f"{scheme}://{rest}"
+            return raw
+
+        h = (host or "localhost").strip().rstrip(":")
+        p = self.REDIS_PORT
+        if ":" in h and not h.startswith("["):
+            parts = h.rsplit(":", 1)
+            if parts[1].isdigit():
+                h = parts[0]
+                p = int(parts[1])
+
+        if p is None:
+            p = 56379 if h in ("localhost", "127.0.0.1") and self.APP_ENV != "production" else 6379
+
+        return f"redis://{h}:{p}/{self.REDIS_DB}"
 
     @property
     def corridor_bbox(self) -> tuple[float, float, float, float]:
