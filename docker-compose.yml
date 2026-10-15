@@ -70,6 +70,7 @@ services:
       ADMIN_BOOTSTRAP_PASSWORD: ${ADMIN_PASSWORD:-${ADMIN_BOOTSTRAP_PASSWORD:-}}
     volumes:
       - ./backend:/app/backend
+      - ./ml:/app/ml
       - evidence_data:/app/data/evidence
     depends_on:
       db:

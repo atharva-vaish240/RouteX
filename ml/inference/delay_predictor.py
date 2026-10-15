@@ -33,13 +33,37 @@ class MountainDelayPredictor:
         self._load()
 
     def _load(self):
-        if not os.path.exists(self.weights):
-            raise FileNotFoundError(f"Missing weights: {self.weights}")
+        target_path = None
+        candidate_paths = [
+            self.weights,
+            os.path.join(ROOT_DIR, "ml", "models", "xgboost", "travel_delay_xgboost.json"),
+            os.path.join(os.getcwd(), "ml", "models", "xgboost", "travel_delay_xgboost.json"),
+            os.path.join("/app", "ml", "models", "xgboost", "travel_delay_xgboost.json"),
+        ]
+        for p in candidate_paths:
+            if p and os.path.exists(p):
+                target_path = p
+                break
+
+        if not target_path:
+            raise FileNotFoundError(f"Missing weights: {self.weights}. Checked: {candidate_paths}")
+
+        self.weights = target_path
         self.reg = xgb.XGBRegressor()
         self.reg.load_model(self.weights)
-        if os.path.exists(self.meta):
-            with open(self.meta, "r") as f:
-                self.meta_dict = json.load(f)
+
+        meta_candidates = [
+            self.meta,
+            os.path.join(ROOT_DIR, "ml", "models", "xgboost", "travel_delay_metadata.json"),
+            os.path.join(os.getcwd(), "ml", "models", "xgboost", "travel_delay_metadata.json"),
+            os.path.join("/app", "ml", "models", "xgboost", "travel_delay_metadata.json"),
+        ]
+        for mp in meta_candidates:
+            if mp and os.path.exists(mp):
+                self.meta = mp
+                with open(self.meta, "r") as f:
+                    self.meta_dict = json.load(f)
+                break
 
     def close(self):
         if self.terrain:

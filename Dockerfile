@@ -20,19 +20,22 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /bin/uv
 
 # Copy package specifications
-COPY pyproject.toml ./
-COPY README.md ./
+COPY pyproject.toml README.md ./
 
 # Create virtual environment and install dependencies
 RUN uv venv /opt/venv
 ENV PATH="/opt/venv/bin:$PATH"
 
-# Copy source code and install project
+# Install dependencies first (layer-cached)
+RUN uv pip install -r pyproject.toml
+
+# Copy source code and ML models/inference
 COPY backend/ ./backend/
+COPY ml/ ./ml/
 COPY migrations/ ./migrations/
 COPY alembic.ini ./
 
-RUN uv pip install -e "."
+RUN uv pip install --no-deps -e "."
 
 EXPOSE 8000
 

@@ -1,0 +1,47 @@
+# Python bytecode and caches
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Virtual environments
+.venv/
+env/
+venv/
+ENV/
+
+# Git and tooling
+.git/
+.gitignore
+.github/
+.playwright-mcp/
+.agents/
+
+# Frontend application (built and deployed separately)
+frontend/
+
+# Local caches & logs
+cache/
+*.log
+
+# Large datasets & raw data (per Master PRD and deployment constraints)
+data/
+
+# ML training, notebooks, and large YOLO / PyTorch model assets
+ml/training/
+ml/notebooks/
+ml/models/best.pt
+ml/models/yolo26/
+ml/models/road_extraction/
+*.pt
+*.pth
+*.onnx
+
+# Documentation & IDE
+docs/
+.idea/
+.vscode/
+*.swp

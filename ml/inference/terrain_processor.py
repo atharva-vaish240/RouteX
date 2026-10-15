@@ -1,8 +1,14 @@
 import os
 import math
 import numpy as np
-import rasterio
-from rasterio.windows import Window
+try:
+    import rasterio
+    from rasterio.windows import Window
+    RASTERIO_AVAILABLE = True
+except ImportError:
+    rasterio = None
+    Window = None
+    RASTERIO_AVAILABLE = False
 
 ROOT_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 DEM_DIR = os.path.join(ROOT_DIR, "data", "satellite", "raw_dem")
@@ -20,10 +26,18 @@ class TerrainProcessor:
         self._init_rasters()
 
     def _init_rasters(self):
+        if not RASTERIO_AVAILABLE:
+            return
         if os.path.exists(self.west_dem):
-            self.src_w = rasterio.open(self.west_dem)
+            try:
+                self.src_w = rasterio.open(self.west_dem)
+            except Exception:
+                self.src_w = None
         if os.path.exists(self.east_dem):
-            self.src_e = rasterio.open(self.east_dem)
+            try:
+                self.src_e = rasterio.open(self.east_dem)
+            except Exception:
+                self.src_e = None
 
     def close(self):
         if self.src_w:

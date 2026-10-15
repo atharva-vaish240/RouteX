@@ -25,13 +25,37 @@ class SegmentRiskPredictor:
         self._load()
 
     def _load(self):
-        if not os.path.exists(self.model_file):
-            raise FileNotFoundError(f"Missing weights: {self.model_file}")
+        target_path = None
+        candidate_paths = [
+            self.model_file,
+            os.path.join(ROOT_DIR, "ml", "models", "xgboost", "landslide_risk_xgboost.json"),
+            os.path.join(os.getcwd(), "ml", "models", "xgboost", "landslide_risk_xgboost.json"),
+            os.path.join("/app", "ml", "models", "xgboost", "landslide_risk_xgboost.json"),
+        ]
+        for p in candidate_paths:
+            if p and os.path.exists(p):
+                target_path = p
+                break
+
+        if not target_path:
+            raise FileNotFoundError(f"Missing weights: {self.model_file}. Checked: {candidate_paths}")
+
+        self.model_file = target_path
         self.clf = xgb.XGBClassifier()
         self.clf.load_model(self.model_file)
-        if os.path.exists(self.meta_file):
-            with open(self.meta_file, "r") as f:
-                self.meta = json.load(f)
+
+        meta_candidates = [
+            self.meta_file,
+            os.path.join(ROOT_DIR, "ml", "models", "xgboost", "model_metadata.json"),
+            os.path.join(os.getcwd(), "ml", "models", "xgboost", "model_metadata.json"),
+            os.path.join("/app", "ml", "models", "xgboost", "model_metadata.json"),
+        ]
+        for mp in meta_candidates:
+            if mp and os.path.exists(mp):
+                self.meta_file = mp
+                with open(self.meta_file, "r") as f:
+                    self.meta = json.load(f)
+                break
 
     def close(self):
         if self.terrain:
