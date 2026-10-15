@@ -1,7 +1,8 @@
 "use client";
 
-import React, { useEffect, useRef, useCallback } from "react";
+import React, { useEffect, useRef, useCallback, useState } from "react";
 import * as maplibregl from "maplibre-gl";
+import "maplibre-gl/dist/maplibre-gl.css";
 import type { BackendInfoResponse, RoadFeatureCollection, RoadFeatureProperties } from "@/types/roads";
 
 // Configure Web Worker URL for MapLibre in Next.js bundler
@@ -49,21 +50,44 @@ const OSM_STYLE: maplibregl.StyleSpecification = {
   sources: {
     osm: {
       type: "raster",
-      tiles: ["https://tile.openstreetmap.org/{z}/{x}/{y}.png"],
+      tiles: [
+        "https://a.tile.openstreetmap.org/{z}/{x}/{y}.png",
+        "https://b.tile.openstreetmap.org/{z}/{x}/{y}.png",
+        "https://c.tile.openstreetmap.org/{z}/{x}/{y}.png",
+      ],
       tileSize: 256,
+      maxzoom: 19,
       attribution:
         '&copy; <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener noreferrer">OpenStreetMap</a> contributors',
     },
   },
   layers: [
     {
+      id: "background-fallback",
+      type: "background",
+      paint: {
+        "background-color": "#EAF2E7",
+      },
+    },
+    {
       id: "osm-raster-layer",
       type: "raster",
       source: "osm",
       minzoom: 0,
       maxzoom: 19,
+      paint: {
+        "raster-opacity": 1,
+      },
     },
   ],
+};
+
+// Fallback bounds for Guwahati–Tawang corridor if backend bbox is unavailable
+export const FALLBACK_CORRIDOR_BBOX = {
+  south: 26.1,
+  west: 91.5,
+  north: 27.7,
+  east: 92.8,
 };
 
 // Status badge styling helper
@@ -122,6 +146,7 @@ export default function RoadMap({
   const vehicleMarkersMapRef = useRef<Map<string, { marker: maplibregl.Marker; el: HTMLDivElement }>>(new Map());
   const onSelectRoadRef = useRef(onSelectRoad);
   const onMapClickRef = useRef(onMapClick);
+  const [initError, setInitError] = useState<string | null>(null);
 
   useEffect(() => {
     onSelectRoadRef.current = onSelectRoad;
@@ -327,7 +352,7 @@ export default function RoadMap({
   }, []);
 
   useEffect(() => {
-    if (!mapContainerRef.current) return;
+    if (!mapContainerRef.current || mapInstanceRef.current) return;
 
     // Reinforce worker URL setup on client mount
     maplibregl.setWorkerUrl("/maplibre-gl-worker.mjs");
@@ -336,17 +361,42 @@ export default function RoadMap({
     const initialCenter: [number, number] = customCenter || [91.7362, 26.1445];
     const initialZoom = customZoom ?? 9;
 
-    const map = new maplibregl.Map({
-      container: mapContainerRef.current,
-      style: OSM_STYLE,
-      center: initialCenter,
-      zoom: initialZoom,
-      attributionControl: {
-        compact: false,
-      },
-    });
+    console.log("[RoadMap MOUNT] container clientWidth/Height:", mapContainerRef.current.clientWidth, mapContainerRef.current.clientHeight);
+    console.log("[RoadMap MOUNT] container offsetWidth/Height:", mapContainerRef.current.offsetWidth, mapContainerRef.current.offsetHeight);
 
-    mapInstanceRef.current = map;
+    let map: maplibregl.Map;
+    try {
+      map = new maplibregl.Map({
+        container: mapContainerRef.current,
+        style: OSM_STYLE,
+        center: initialCenter,
+        zoom: initialZoom,
+        attributionControl: {
+          compact: false,
+        },
+      });
+
+      map.on("error", (e) => {
+        console.error("[RoadMap ERROR EVENT]", e.error?.message || e);
+      });
+
+      map.on("load", () => {
+        console.log("[RoadMap LOAD EVENT] map style loaded!");
+      });
+
+      map.on("sourcedata", (e) => {
+        if (e.sourceId === "osm") {
+          console.log("[RoadMap OSM SOURCEDATA] isSourceLoaded:", e.isSourceLoaded, "dataType:", e.dataType);
+        }
+      });
+
+      mapInstanceRef.current = map;
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : "WebGL context initialization failed.";
+      console.error("Failed to initialize MapLibre GL engine:", msg);
+      setInitError(msg);
+      return;
+    }
 
     // Add navigation controls (zoom in/out, compass) if not hidden
     if (!hideNavControls) {
@@ -360,9 +410,46 @@ export default function RoadMap({
       }
     });
 
+    const handleResize = () => {
+      if (mapInstanceRef.current) {
+        mapInstanceRef.current.resize();
+      }
+    };
+    window.addEventListener("resize", handleResize);
+
+    map.on("load", () => {
+      map.resize();
+      const bbox = backendInfo?.corridor?.bbox || FALLBACK_CORRIDOR_BBOX;
+      fitCorridorBounds(map, bbox);
+      if (roadsData) {
+        addOrUpdateRoadSource(map, roadsData);
+      }
+    });
+
+    // Schedule resize triggers to handle layout shifts
+    const frameId = requestAnimationFrame(() => {
+      map.resize();
+    });
+    const timerId = setTimeout(() => {
+      map.resize();
+    }, 150);
+
+    const ro = typeof ResizeObserver !== "undefined" && mapContainerRef.current
+      ? new ResizeObserver(() => {
+          map.resize();
+        })
+      : null;
+    if (ro && mapContainerRef.current) {
+      ro.observe(mapContainerRef.current);
+    }
+
     const vehicleMap = vehicleMarkersMapRef.current;
 
     return () => {
+      cancelAnimationFrame(frameId);
+      clearTimeout(timerId);
+      if (ro) ro.disconnect();
+      window.removeEventListener("resize", handleResize);
       if (activePopupRef.current) {
         activePopupRef.current.remove();
       }
@@ -375,18 +462,18 @@ export default function RoadMap({
     };
   }, [customCenter, customZoom, hideNavControls]);
 
-  // Handle bounds update when backend info arrives
+  // Handle bounds update when backend info arrives or falls back
   useEffect(() => {
     const map = mapInstanceRef.current;
-    if (!map || !backendInfo?.corridor?.bbox) return;
+    if (!map) return;
+
+    const bbox = backendInfo?.corridor?.bbox || FALLBACK_CORRIDOR_BBOX;
 
     if (map.isStyleLoaded()) {
-      fitCorridorBounds(map, backendInfo.corridor.bbox);
+      fitCorridorBounds(map, bbox);
     } else {
       map.once("load", () => {
-        if (backendInfo?.corridor?.bbox) {
-          fitCorridorBounds(map, backendInfo.corridor.bbox);
-        }
+        fitCorridorBounds(map, bbox);
       });
     }
   }, [backendInfo]);
@@ -635,9 +722,51 @@ export default function RoadMap({
     }
   }, [vehicleMarkers]);
 
+  if (initError) {
+    return (
+      <div
+        className={className ? `relative min-h-[500px] flex items-center justify-center bg-[#FAFBF7] ${className}` : "relative w-full h-full min-h-[500px] flex items-center justify-center bg-[#FAFBF7]"}
+        style={{ minHeight: "500px", width: "100%", height: "100%" }}
+      >
+        <div className="max-w-md p-6 bg-white border border-[#DCE5D8] rounded-2xl shadow-xl text-center">
+          <div className="w-10 h-10 rounded-full bg-[#FFF0E6] text-[#F97316] flex items-center justify-center text-lg font-bold mx-auto mb-3">
+            ⚠️
+          </div>
+          <h3 className="text-sm font-bold text-[#193B32] mb-1">Map Engine Initialization Notice</h3>
+          <p className="text-xs text-[#71877D] mb-4 leading-relaxed">
+            {initError}. Please verify hardware acceleration or WebGL support in your browser settings.
+          </p>
+          <button
+            type="button"
+            onClick={() => window.location.reload()}
+            className="px-4 py-1.5 text-xs font-semibold rounded-full bg-[#16A779] text-white hover:bg-[#128a63] cursor-pointer"
+          >
+            Retry Loading Map
+          </button>
+        </div>
+      </div>
+    );
+  }
+
   return (
-    <div className={className || "relative w-full h-full min-h-[500px]"}>
-      <div ref={mapContainerRef} className="w-full h-full absolute inset-0" />
+    <div
+      className={className ? `relative min-h-[500px] flex-1 w-full h-full ${className}` : "relative w-full h-full min-h-[500px] flex-1"}
+      style={{ minHeight: "500px", width: "100%", height: "100%", position: "relative" }}
+    >
+      <div
+        ref={mapContainerRef}
+        className="w-full h-full"
+        style={{
+          position: "absolute",
+          top: 0,
+          left: 0,
+          right: 0,
+          bottom: 0,
+          width: "100%",
+          height: "100%",
+          minHeight: "100%",
+        }}
+      />
     </div>
   );
 }
