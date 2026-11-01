@@ -214,6 +214,8 @@ class SSEBroadcaster:
         ]
         # Start reading new events from Redis
         last_ids = {s: "$" for s in stream_keys}
+        reconnect_delay = 2.0
+        max_reconnect_delay = 30.0
 
         while self._running:
             try:
@@ -225,6 +227,7 @@ class SSEBroadcaster:
                 try:
                     while self._running:
                         entries = await client.xread(last_ids, block=1000, count=50)
+                        reconnect_delay = 2.0  # Reset backoff on active read
                         if not entries:
                             continue
 
@@ -244,8 +247,9 @@ class SSEBroadcaster:
                 break
             except Exception as exc:
                 if self._running:
-                    logger.warning(f"Redis Streams consumer reconnecting in 2s: {exc}")
-                    await asyncio.sleep(2.0)
+                    logger.warning(f"Redis Streams consumer reconnecting in {int(reconnect_delay)}s: {exc}")
+                    await asyncio.sleep(reconnect_delay)
+                    reconnect_delay = min(reconnect_delay * 1.5, max_reconnect_delay)
 
 
 # Global singleton instance

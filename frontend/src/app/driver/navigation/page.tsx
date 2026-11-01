@@ -384,39 +384,37 @@ export default function ActiveNavigationPage() {
 
             {/* Action buttons at bottom of panel */}
             <div className="pt-4 mt-4 border-t border-[#E8EFE5] flex flex-col gap-2">
-              {activeBackendTrip?.vehicle_id && (
-                <div className="flex flex-col gap-1">
-                  <button
-                    type="button"
-                    onClick={() => {
-                      if (isTracking) {
-                        stopTracking();
-                      } else if (activeBackendTrip?.vehicle_id) {
-                        startTracking(activeBackendTrip.vehicle_id, activeBackendTrip.id);
-                      }
-                    }}
-                    id="navigation-toggle-tracking-btn"
-                    className={`w-full py-2 px-3 border rounded-full text-xs font-semibold flex items-center justify-center gap-1.5 transition-colors cursor-pointer ${
-                      isTracking
-                        ? "bg-rose-50 hover:bg-rose-100 text-rose-700 border-rose-300"
-                        : "bg-[#EAF2E7] hover:bg-[#DDF4E8] text-[#12432A] border-[#B7E4CD]"
-                    }`}
-                  >
-                    <span className={`w-2 h-2 rounded-full ${isTracking ? "bg-rose-500 animate-pulse" : "bg-emerald-500"}`} />
-                    <span>{isTracking ? "Stop Live GPS Tracking" : "Start Live GPS Tracking"}</span>
-                  </button>
-                  {lastSyncedAt && (
-                    <span className="text-[10px] text-center text-[#71877D]">
-                      GPS Synced: {new Date(lastSyncedAt).toLocaleTimeString()}
-                    </span>
-                  )}
-                  {trackingError && (
-                    <span className="text-[10px] text-center text-rose-600 font-semibold">
-                      ⚠️ {trackingError}
-                    </span>
-                  )}
-                </div>
-              )}
+              <div className="flex flex-col gap-1">
+                <button
+                  type="button"
+                  onClick={() => {
+                    if (isTracking) {
+                      stopTracking();
+                    } else {
+                      startTracking(activeBackendTrip?.vehicle_id, activeBackendTrip?.id);
+                    }
+                  }}
+                  id="navigation-toggle-tracking-btn"
+                  className={`w-full py-2 px-3 border rounded-full text-xs font-semibold flex items-center justify-center gap-1.5 transition-colors cursor-pointer ${
+                    isTracking
+                      ? "bg-rose-50 hover:bg-rose-100 text-rose-700 border-rose-300"
+                      : "bg-[#EAF2E7] hover:bg-[#DDF4E8] text-[#12432A] border-[#B7E4CD]"
+                  }`}
+                >
+                  <span className={`w-2 h-2 rounded-full ${isTracking ? "bg-rose-500 animate-pulse" : "bg-emerald-500"}`} />
+                  <span>{isTracking ? "Stop Live GPS Tracking" : "Start Live GPS Tracking"}</span>
+                </button>
+                {lastSyncedAt && (
+                  <span className="text-[10px] text-center text-[#71877D]">
+                    GPS Synced: {new Date(lastSyncedAt).toLocaleTimeString()}
+                  </span>
+                )}
+                {trackingError && (
+                  <span className="text-[10px] text-center text-rose-600 font-semibold">
+                    ⚠️ {trackingError}
+                  </span>
+                )}
+              </div>
               <Link
                 href="/driver/report-incident"
                 className="w-full py-2.5 px-4 bg-[#FFF8EB] hover:bg-[#FCE1B6] text-[#A66007] border border-[#FCE1B6] rounded-full text-xs font-bold flex items-center justify-center gap-1.5 transition-colors"

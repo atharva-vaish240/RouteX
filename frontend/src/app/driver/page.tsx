@@ -58,18 +58,16 @@ export default function DriverDashboardPage() {
   const vehicleId = activeBackendTrip?.vehicle?.id || activeBackendTrip?.vehicle_id;
 
   const handleFixSent = useCallback((fix: { longitude: number; latitude: number; speedKmh: number | null; headingDeg: number | null; timestamp: string }) => {
-    if (vehicleId) {
-      setDriverMarker({
-        id: vehicleId,
-        lngLat: [fix.longitude, fix.latitude],
-        label: trip.vehicleNumber || "My Vehicle",
-        speedKmh: fix.speedKmh,
-        heading: fix.headingDeg,
-        isCurrentDriver: true,
-        isStale: false,
-        updatedAt: fix.timestamp,
-      });
-    }
+    setDriverMarker({
+      id: vehicleId || "current-driver-marker",
+      lngLat: [fix.longitude, fix.latitude],
+      label: trip.vehicleNumber || "My Vehicle",
+      speedKmh: fix.speedKmh,
+      heading: fix.headingDeg,
+      isCurrentDriver: true,
+      isStale: false,
+      updatedAt: fix.timestamp,
+    });
   }, [vehicleId, trip.vehicleNumber]);
 
   const {
@@ -187,6 +185,25 @@ export default function DriverDashboardPage() {
                 .catch(() => {});
             }
           }
+        } else {
+          // If no assigned trip found, query available vehicles to bind telemetry
+          api.get<{ items: Array<{ id: string; registration_number?: string; vehicle_code?: string }> }>("/api/v1/vehicles?limit=5")
+            .then((vData) => {
+              if (isMounted && vData && vData.items && vData.items.length > 0) {
+                const firstVeh = vData.items[0];
+                setActiveBackendTrip((prev) => prev || {
+                  id: "active-assigned-trip",
+                  status: "IN_TRANSIT",
+                  vehicle_id: firstVeh.id,
+                  vehicle: firstVeh,
+                });
+                setTrip((prev) => ({
+                  ...prev,
+                  vehicleNumber: firstVeh.registration_number || firstVeh.vehicle_code || prev.vehicleNumber,
+                }));
+              }
+            })
+            .catch(() => {});
         }
       })
       .catch(() => {});
@@ -241,7 +258,7 @@ export default function DriverDashboardPage() {
               onClick={() => {
                 if (isTracking) {
                   stopTracking();
-                } else if (vehicleId) {
+                } else {
                   startTracking(vehicleId, activeBackendTrip?.id);
                 }
               }}

@@ -25,7 +25,7 @@ export interface UseGpsTrackerReturn {
   lastSyncedAt: string | null;
   syncCount: number;
   trackingError: string | null;
-  startTracking: (vehicleId: string, tripId?: string | null) => void;
+  startTracking: (vehicleId?: string | null, tripId?: string | null) => void;
   stopTracking: () => void;
 }
 
@@ -59,8 +59,6 @@ export function useGpsTracker(options: UseGpsTrackerOptions = {}): UseGpsTracker
   const handlePositionSuccess = useCallback(
     async (pos: GeolocationPosition) => {
       const vehicleId = activeVehicleIdRef.current;
-      if (!vehicleId) return;
-
       const nowMs = Date.now();
       const speedKmh =
         pos.coords.speed != null && !isNaN(pos.coords.speed) && pos.coords.speed >= 0
@@ -84,6 +82,7 @@ export function useGpsTracker(options: UseGpsTrackerOptions = {}): UseGpsTracker
 
       setLastFix(currentFix);
       setTrackingError(null);
+      if (onFixSent) onFixSent(currentFix);
 
       // Enforce update interval throttling (~5s) unless this is the very first fix
       if (nowMs - lastPushTimeRef.current < minIntervalMs && lastPushTimeRef.current !== 0) {
@@ -92,6 +91,20 @@ export function useGpsTracker(options: UseGpsTrackerOptions = {}): UseGpsTracker
 
       // Check monotonicity
       if (latestRecordedAtRef.current && fixTime <= latestRecordedAtRef.current) {
+        return;
+      }
+
+      // Verify if vehicleId is a valid backend UUID
+      const isUuid =
+        !!vehicleId &&
+        /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(vehicleId);
+
+      if (!isUuid) {
+        // Local GPS preview mode: coordinates tracked locally on map even if vehicle isn't provisioned yet
+        lastPushTimeRef.current = nowMs;
+        const syncTimeStr = new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+        setLastSyncedAt(syncTimeStr);
+        setSyncCount((c) => c + 1);
         return;
       }
 
@@ -114,7 +127,6 @@ export function useGpsTracker(options: UseGpsTrackerOptions = {}): UseGpsTracker
         const syncTimeStr = new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
         setLastSyncedAt(syncTimeStr);
         setSyncCount((c) => c + 1);
-        if (onFixSent) onFixSent(currentFix);
       } catch (err: unknown) {
         let msg = "Telemetry sync failed.";
         if (err instanceof ApiError) {
@@ -148,14 +160,11 @@ export function useGpsTracker(options: UseGpsTrackerOptions = {}): UseGpsTracker
   );
 
   const startTracking = useCallback(
-    (vehicleId: string, tripId?: string | null) => {
-      if (!vehicleId) {
-        setTrackingError("No assigned vehicle found to associate telemetry with.");
-        return;
-      }
-
+    (vehicleId?: string | null, tripId?: string | null) => {
       if (typeof window === "undefined" || !("geolocation" in navigator)) {
-        setTrackingError("Geolocation is not supported by your browser or device.");
+        const errorMsg = "Geolocation is not supported by your browser or device.";
+        setTrackingError(errorMsg);
+        if (onError) onError(errorMsg);
         return;
       }
 
@@ -165,7 +174,7 @@ export function useGpsTracker(options: UseGpsTrackerOptions = {}): UseGpsTracker
       }
 
       setTrackingError(null);
-      activeVehicleIdRef.current = vehicleId;
+      activeVehicleIdRef.current = vehicleId || "local-preview";
       activeTripIdRef.current = tripId || null;
       lastPushTimeRef.current = 0;
 
@@ -184,9 +193,10 @@ export function useGpsTracker(options: UseGpsTrackerOptions = {}): UseGpsTracker
       } catch (e: unknown) {
         const msg = e instanceof Error ? e.message : "Failed to initialize GPS tracking.";
         setTrackingError(msg);
+        if (onError) onError(msg);
       }
     },
-    [handlePositionSuccess, handlePositionError]
+    [handlePositionSuccess, handlePositionError, onError]
   );
 
   // Clean up watcher when hook unmounts
