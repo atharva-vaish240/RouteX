@@ -233,20 +233,72 @@ class AuthService:
 
         # Token Reuse Detection (Replay Attack Protection)
         if session_record.is_revoked:
-            logger.critical(
-                f"SECURITY ALERT: Refresh token reuse detected for user {session_record.user_id}! "
-                f"Revoking all active sessions immediately."
-            )
-            # Revoke all sessions for this user
-            await self.revoke_all_user_sessions(session_record.user_id)
-            record_audit_log(
-                session=self.session,
-                action="auth_token_reuse_detected",
-                entity_type="user",
-                entity_id=str(session_record.user_id),
-                details={"ip": ip_address, "session_id": str(session_record.id)},
-            )
-            await self.session.commit()
+            revoked_at = session_record.revoked_at or session_record.created_at
+            time_since_revocation = (now - revoked_at).total_seconds()
+            grace_period = getattr(settings, "REFRESH_TOKEN_ROTATION_GRACE_SECONDS", 0)
+
+            # 1. Grace Period for Concurrent Requests / Network Race Conditions
+            if grace_period > 0 and time_since_revocation <= grace_period:
+                logger.info(
+                    f"Refresh token for user {session_record.user_id} was recently rotated ({time_since_revocation:.1f}s ago). "
+                    f"Handling as concurrent request within {grace_period}s grace period."
+                )
+                user = await self.session.get(User, session_record.user_id)
+                if not user or not user.is_active:
+                    raise HTTPException(
+                        status_code=status.HTTP_403_FORBIDDEN,
+                        detail="User account is deactivated or no longer exists.",
+                    )
+
+                new_raw_refresh, new_token_hash = generate_refresh_token()
+                new_session = UserSession(
+                    id=uuid.uuid4(),
+                    user_id=user.id,
+                    token_hash=new_token_hash,
+                    expires_at=now + timedelta(days=settings.JWT_REFRESH_TOKEN_EXPIRE_DAYS),
+                    user_agent=user_agent[:255] if user_agent else None,
+                    ip_address=ip_address[:45] if ip_address else None,
+                    created_at=now,
+                )
+                self.session.add(new_session)
+                await self.session.commit()
+
+                new_access_token = create_access_token(
+                    user_id=user.id,
+                    role=user.role,
+                    email=user.email,
+                )
+                user_resp = UserResponse.model_validate(user)
+                token_resp = TokenResponse(
+                    access_token=new_access_token,
+                    token_type="bearer",
+                    expires_in=settings.JWT_ACCESS_TOKEN_EXPIRE_MINUTES * 60,
+                    refresh_token=new_raw_refresh,
+                    user=user_resp,
+                )
+                return token_resp, new_raw_refresh
+
+            # 2. Outside Grace Period: Genuine Token Reuse / Stale Replay
+            active_revoked = await self.revoke_all_user_sessions(session_record.user_id)
+            if active_revoked > 0:
+                logger.critical(
+                    f"SECURITY ALERT: Refresh token reuse detected for user {session_record.user_id}! "
+                    f"Revoking all {active_revoked} active sessions immediately."
+                )
+                record_audit_log(
+                    session=self.session,
+                    action="auth_token_reuse_detected",
+                    entity_type="user",
+                    entity_id=str(session_record.user_id),
+                    details={"ip": ip_address, "session_id": str(session_record.id)},
+                )
+                await self.session.commit()
+            else:
+                logger.warning(
+                    f"Stale/revoked refresh token presented for user {session_record.user_id} "
+                    f"(revoked {time_since_revocation:.1f}s ago). All sessions are already invalidated."
+                )
+
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail="Compromised or already revoked token detected. All active sessions have been invalidated.",

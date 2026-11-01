@@ -138,8 +138,8 @@ export function connectEventStream(options: EventStreamOptions): () => void {
           startConnection();
           return;
         } else {
-          notifyStatus("error");
-          scheduleReconnect();
+          notifyStatus("disconnected");
+          // Abort reconnection loop: authentication failed and cannot be refreshed
           return;
         }
       }

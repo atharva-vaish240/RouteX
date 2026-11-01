@@ -2,6 +2,7 @@
 
 from typing import Annotated
 from fastapi import APIRouter, Cookie, Depends, Header, HTTPException, Request, Response, status
+from fastapi.responses import JSONResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.auth.security import get_current_user
@@ -79,7 +80,7 @@ async def refresh_token(
     response: Response,
     session: Annotated[AsyncSession, Depends(get_async_session)],
     payload: RefreshTokenRequest | None = None,
-) -> TokenResponse:
+) -> TokenResponse | JSONResponse:
     """
     Refreshes an access token using a valid refresh token from an HttpOnly cookie or request body.
     Implements single-use token rotation: the previous refresh token is immediately invalidated.
@@ -89,21 +90,42 @@ async def refresh_token(
     raw_refresh = body_token or cookie_token
 
     if not raw_refresh:
-        raise HTTPException(
+        err_res = JSONResponse(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Missing refresh token. Provide via cookie or request body.",
+            content={"detail": "Missing refresh token. Provide via cookie or request body."},
             headers={"WWW-Authenticate": "Bearer"},
         )
+        err_res.delete_cookie(
+            key=settings.REFRESH_COOKIE_NAME,
+            path=settings.REFRESH_COOKIE_PATH,
+            secure=settings.REFRESH_COOKIE_SECURE,
+            samesite=settings.REFRESH_COOKIE_SAMESITE,
+        )
+        return err_res
 
     service = AuthService(session)
     user_agent = request.headers.get("user-agent")
     client_ip = request.client.host if request.client else None
 
-    token_resp, new_raw_refresh = await service.refresh_session(
-        raw_refresh_token=raw_refresh,
-        user_agent=user_agent,
-        ip_address=client_ip,
-    )
+    try:
+        token_resp, new_raw_refresh = await service.refresh_session(
+            raw_refresh_token=raw_refresh,
+            user_agent=user_agent,
+            ip_address=client_ip,
+        )
+    except HTTPException as exc:
+        err_res = JSONResponse(
+            status_code=exc.status_code,
+            content={"detail": exc.detail},
+            headers=dict(exc.headers) if exc.headers else {},
+        )
+        err_res.delete_cookie(
+            key=settings.REFRESH_COOKIE_NAME,
+            path=settings.REFRESH_COOKIE_PATH,
+            secure=settings.REFRESH_COOKIE_SECURE,
+            samesite=settings.REFRESH_COOKIE_SAMESITE,
+        )
+        return err_res
 
     # Update HttpOnly refresh cookie with rotated token
     response.set_cookie(

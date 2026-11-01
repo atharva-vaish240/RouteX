@@ -129,6 +129,7 @@ class Settings(BaseSettings):
     REFRESH_COOKIE_HTTPONLY: bool = True
     REFRESH_COOKIE_SAMESITE: str = "lax"
     REFRESH_COOKIE_PATH: str = "/api/v1/auth"
+    REFRESH_TOKEN_ROTATION_GRACE_SECONDS: int = 10
 
     # Login Rate Limiting (Redis-backed)
     RATE_LIMIT_LOGIN_MAX_ATTEMPTS: int = 5
